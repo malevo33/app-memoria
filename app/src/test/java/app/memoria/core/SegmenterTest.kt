@@ -34,4 +34,11 @@ class SegmenterTest {
             "De los de lanza en astillero, adarga antigua, rocín flaco y galgo corredor."
         assertEquals(Aligner.tokens(text).size, Segmenter.split(text).sumOf { it.words.size })
     }
+
+    @Test
+    fun cadaArticuloEsUnaSeccion() {
+        val text = "ARTICULO 1°.- Los casos que este Código rige deben ser resueltos. ARTICULO 2°.- La ley debe ser interpretada teniendo en cuenta sus palabras.\nARTICULO 3°.- El juez debe resolver los asuntos que sean sometidos a su jurisdicción."
+        val parts = Segmenter.split(text)
+        assertEquals(listOf(0, 1, 2), parts.map { it.section }.distinct())
+    }
 }

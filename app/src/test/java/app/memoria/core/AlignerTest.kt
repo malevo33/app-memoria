@@ -36,4 +36,12 @@ class AlignerTest {
     fun silencioEsCeroPorCiento() {
         assertEquals(0.0, Aligner.align("hola mundo", "").accuracy, 0.0)
     }
+
+    @Test
+    fun numerosEnCifrasOEnPalabrasSonIguales() {
+        assertEquals(1.0, Aligner.align("ARTICULO 1°. Texto", "artículo primero texto").accuracy, 0.0)
+        assertEquals(1.0, Aligner.align("artículo primero", "artículo 1").accuracy, 0.0)
+        assertEquals(1.0, Aligner.align("ley 32", "ley treinta y dos").accuracy, 0.0)
+        assertEquals(1.0, Aligner.align("la 1ra vez", "la primera vez").accuracy, 0.0)
+    }
 }

@@ -10,6 +10,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import app.memoria.core.Spoken
 import app.memoria.core.VoiceIO
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +19,7 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.resume
+import android.speech.tts.Voice as TtsVoice
 
 /** Voz del teléfono: síntesis y reconocimiento de Android, en español. */
 class Voice(context: Context) : VoiceIO, TextToSpeech.OnInitListener {
@@ -30,17 +32,48 @@ class Voice(context: Context) : VoiceIO, TextToSpeech.OnInitListener {
     private val locale: Locale =
         Locale.getDefault().takeIf { it.language == "es" } ?: Locale.forLanguageTag("es-ES")
 
+    private val prefs = Prefs(appContext)
+
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = locale
+            applyPrefs()
             ready.complete(true)
         } else {
             ready.complete(false)
         }
     }
 
+    /** Aplica la voz y la velocidad elegidas; sin elección, la mejor voz en español instalada. */
+    fun applyPrefs() {
+        val voices = spanishVoices()
+        val chosen = voices.firstOrNull { it.name == prefs.voiceName } ?: voices.firstOrNull()
+        if (chosen != null) tts.voice = chosen
+        tts.setSpeechRate(prefs.speechRate)
+    }
+
+    /** Voces en español instaladas, primero las argentinas y después las de mejor calidad. */
+    fun spanishVoices(): List<TtsVoice> =
+        (runCatching { tts.voices }.getOrNull() ?: emptySet())
+            .filter { it.locale.language == "es" }
+            .filterNot { TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED in it.features }
+            .sortedByDescending { score(it) }
+
+    private fun score(v: TtsVoice): Int {
+        val country = when (v.locale.country) {
+            "AR" -> 2000
+            "UY" -> 1500
+            "ES", "" -> 0
+            else -> 1000 // el resto de Latinoamérica suena más cerca que España
+        }
+        return country + v.quality
+    }
+
+    suspend fun awaitReady(): Boolean = ready.await()
+
     override suspend fun speak(text: String) {
         if (!ready.await()) return
+        val spoken = Spoken.forSpeech(text)
         suspendCancellableCoroutine { cont ->
             val id = UUID.randomUUID().toString()
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -55,7 +88,7 @@ class Voice(context: Context) : VoiceIO, TextToSpeech.OnInitListener {
                     if (utteranceId == id && cont.isActive) cont.resume(Unit)
                 }
             })
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+            tts.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, id)
             cont.invokeOnCancellation { tts.stop() }
         }
     }

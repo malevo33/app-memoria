@@ -13,10 +13,17 @@ object Segmenter {
     const val MIN_WORDS = 8
     const val MAX_WORDS = 30
 
+    /** Se sube cuando cambia la forma de dividir: el progreso guardado con otra versión ya no coincide. */
+    const val VERSION = 2
+
     private val sentence = Regex("[^.!?;:…]+[.!?;:…]*[\"»”’)]*")
+
+    /** Cada artículo de una ley o código arranca una sección nueva, aunque no haya línea en blanco. */
+    private val articleStart = Regex("(?:\\n|(?<=[.:;)])[ \\t]+)(?=[ \\t]*(?:ART[IÍ]CULO|Art[ií]culo|ARTS?\\.|Arts?\\.)[ \\t]*\\d)")
 
     fun split(text: String): List<Part> {
         val sections = text.replace("\r\n", "\n")
+            .replace(articleStart, "\n\n")
             .split(Regex("\\n\\s*\\n"))
             .map { it.trim() }
             .filter { it.isNotEmpty() }

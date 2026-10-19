@@ -37,7 +37,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.${{ github.run_number }}
-          name: Versión 0.1.${{ github.run_number }}
+          tag_name: v0.2.${{ github.run_number }}
+          name: Versión 0.2.${{ github.run_number }}
           make_latest: true
           files: app-memoria.apk
