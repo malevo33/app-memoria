@@ -1,6 +1,8 @@
 package app.memoria.ui
 
 import android.Manifest
+import android.content.Intent
+import android.speech.tts.TextToSpeech
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,6 +24,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalClipboardManager
+import app.memoria.Importer
+import app.memoria.Prefs
+import app.memoria.core.Segmenter
+import kotlinx.coroutines.launch
+import java.util.Locale
+import android.speech.tts.Voice as TtsVoice
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -57,18 +73,19 @@ import app.memoria.core.Planner
 
 private sealed interface Screen {
     data object Home : Screen
-    data class Edit(val text: String) : Screen
+    data class Edit(val text: String, val title: String = "") : Screen
+    data object Voice : Screen
     data class Detail(val id: String) : Screen
     data class Session(val id: String) : Screen
 }
 
 @Composable
-fun App(store: Store, sharedText: String?, onSharedConsumed: () -> Unit) {
+fun App(store: Store, shared: Importer.Imported?, onSharedConsumed: () -> Unit) {
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
 
-    LaunchedEffect(sharedText) {
-        if (sharedText != null) {
-            screen = Screen.Edit(sharedText)
+    LaunchedEffect(shared) {
+        if (shared != null) {
+            screen = Screen.Edit(shared.text, shared.title)
             onSharedConsumed()
         }
     }
@@ -84,10 +101,13 @@ fun App(store: Store, sharedText: String?, onSharedConsumed: () -> Unit) {
             Screen.Home -> HomeScreen(
                 docs = remember(s) { store.list() },
                 onNew = { screen = Screen.Edit("") },
+                onVoice = { screen = Screen.Voice },
                 onOpen = { screen = Screen.Detail(it.id) },
             )
+            Screen.Voice -> VoiceScreen(onBack = { screen = Screen.Home })
             is Screen.Edit -> EditScreen(
                 initialText = s.text,
+                initialTitle = s.title,
                 onSave = { title, text -> screen = Screen.Detail(store.create(title, text).id) },
                 onCancel = { screen = Screen.Home },
             )
@@ -116,9 +136,13 @@ fun App(store: Store, sharedText: String?, onSharedConsumed: () -> Unit) {
 }
 
 @Composable
-private fun HomeScreen(docs: List<Doc>, onNew: () -> Unit, onOpen: (Doc) -> Unit) {
+private fun HomeScreen(docs: List<Doc>, onNew: () -> Unit, onVoice: () -> Unit, onOpen: (Doc) -> Unit) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Memoria", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Memoria", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onVoice) { Text("Voz") }
+        }
         Spacer(Modifier.height(16.dp))
         Button(onClick = onNew, modifier = Modifier.fillMaxWidth().height(56.dp)) {
             Text("Nuevo texto", fontSize = 18.sp)
@@ -126,7 +150,7 @@ private fun HomeScreen(docs: List<Doc>, onNew: () -> Unit, onOpen: (Doc) -> Unit
         Spacer(Modifier.height(16.dp))
         if (docs.isEmpty()) {
             Text(
-                "Cargá un texto para empezar. También podés compartir un texto desde otra app con \"Compartir → Memoria\".",
+                "Cargá un texto para empezar: abrí un PDF o un .txt, pegalo, o compartilo desde otra app con \"Compartir → Memoria\".",
                 style = MaterialTheme.typography.bodyLarge,
             )
         }
@@ -146,14 +170,42 @@ private fun HomeScreen(docs: List<Doc>, onNew: () -> Unit, onOpen: (Doc) -> Unit
     }
 }
 
+/** Los textos más largos que esto no se editan en pantalla: el campo de texto de Android se traba. */
+private const val EDITABLE_LIMIT = 20_000
+
 @Composable
-private fun EditScreen(initialText: String, onSave: (String, String) -> Unit, onCancel: () -> Unit) {
+private fun EditScreen(
+    initialText: String,
+    initialTitle: String,
+    onSave: (String, String) -> Unit,
+    onCancel: () -> Unit,
+) {
     val context = LocalContext.current
-    var title by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    var title by remember { mutableStateOf(initialTitle) }
     var text by remember { mutableStateOf(initialText) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val stats = remember(text) { if (text.isBlank()) null else Segmenter.split(text).let { p -> p.sumOf { it.words.size } to p.size } }
+
     val openFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { text = it.readText() }
+            loading = true
+            error = null
+            scope.launch {
+                try {
+                    val imported = Importer.read(context, uri)
+                    text = imported.text
+                    if (title.isBlank()) title = imported.title
+                } catch (e: Importer.NoTextException) {
+                    error = "Ese archivo no tiene texto para leer. Si es un PDF escaneado (fotos de páginas), no se puede usar todavía."
+                } catch (e: Exception) {
+                    error = "No pude abrir el archivo: ${e.message ?: e.javaClass.simpleName}"
+                } finally {
+                    loading = false
+                }
+            }
         }
     }
 
@@ -166,22 +218,119 @@ private fun EditScreen(initialText: String, onSave: (String, String) -> Unit, on
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            label = { Text("Pegá el texto acá (una línea en blanco separa secciones)") },
-            modifier = Modifier.fillMaxWidth().weight(1f),
-        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { openFile.launch(arrayOf("text/plain")) }) { Text("Abrir .txt") }
+            OutlinedButton(onClick = { openFile.launch(arrayOf("application/pdf", "text/plain")) }) {
+                Text("Abrir PDF o .txt")
+            }
+            OutlinedButton(onClick = { clipboard.getText()?.text?.let { text = it } }) { Text("Pegar") }
+        }
+        when {
+            loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(24.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("Leyendo el archivo…")
+            }
+            error != null -> Text(error!!, color = MaterialTheme.colorScheme.error)
+        }
+        if (stats != null) {
+            Text("${stats.first} palabras · ${stats.second} partes", style = MaterialTheme.typography.labelLarge)
+        }
+        if (text.length <= EDITABLE_LIMIT) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("O escribí el texto acá (una línea en blanco separa secciones)") },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        } else {
+            // Texto largo: se muestra el comienzo sin editar, para que no se trabe el teclado.
+            Card(Modifier.fillMaxWidth().weight(1f)) {
+                Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+                    Text(text.take(3000) + "…", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            TextButton(onClick = { text = "" }) { Text("Quitar el texto") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onCancel) { Text("Cancelar") }
             Spacer(Modifier.weight(1f))
             Button(
-                enabled = text.isNotBlank(),
+                enabled = text.isNotBlank() && !loading,
                 onClick = { onSave(title.ifBlank { text.trim().take(40) }, text) },
             ) { Text("Guardar") }
         }
     }
+}
+
+@Composable
+private fun VoiceScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val prefs = remember { Prefs(context) }
+    val voice = remember { Voice(context) }
+    var voices by remember { mutableStateOf<List<TtsVoice>>(emptyList()) }
+    var chosen by remember { mutableStateOf(prefs.voiceName) }
+    var rate by remember { mutableFloatStateOf(prefs.speechRate) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(voice) {
+        if (voice.awaitReady()) {
+            voices = voice.spanishVoices()
+            if (chosen == null) chosen = voices.firstOrNull()?.name
+        }
+    }
+    DisposableEffect(Unit) { onDispose { voice.release() } }
+
+    fun test() {
+        prefs.voiceName = chosen
+        prefs.speechRate = rate
+        voice.applyPrefs()
+        scope.launch { voice.speak("Hola, así sueno yo. Artículo 1°. Seguí después de: los casos que este Código rige.") }
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Voz", style = MaterialTheme.typography.headlineSmall)
+        Text("Velocidad: ${"%.1f".format(rate)}×")
+        Slider(value = rate, onValueChange = { rate = it }, valueRange = 0.6f..1.6f, steps = 9)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = ::test) { Text("Probar") }
+            OutlinedButton(onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            }) { Text("Instalar más voces") }
+        }
+        if (voices.isEmpty()) Text("Buscando voces en español…")
+        LazyColumn(Modifier.weight(1f)) {
+            items(voices, key = { it.name }) { v ->
+                Row(
+                    Modifier.fillMaxWidth().clickable { chosen = v.name; test() }.padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = chosen == v.name, onClick = { chosen = v.name; test() })
+                    Column {
+                        Text(voiceLabel(v), style = MaterialTheme.typography.bodyLarge)
+                        Text(v.name, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+        Button(onClick = { prefs.voiceName = chosen; prefs.speechRate = rate; onBack() }, modifier = Modifier.fillMaxWidth()) {
+            Text("Listo")
+        }
+    }
+}
+
+private fun voiceLabel(v: TtsVoice): String {
+    val country = v.locale.getDisplayCountry(Locale.forLanguageTag("es")).ifBlank { "general" }
+    val quality = when {
+        v.quality >= TtsVoice.QUALITY_VERY_HIGH -> "muy natural"
+        v.quality >= TtsVoice.QUALITY_HIGH -> "natural"
+        else -> "básica"
+    }
+    val net = if (v.isNetworkConnectionRequired) " · necesita internet" else ""
+    return "Español ($country) · $quality$net"
 }
 
 @Composable

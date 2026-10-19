@@ -3,6 +3,7 @@ package app.memoria
 import android.content.Context
 import app.memoria.core.Doc
 import app.memoria.core.PartStats
+import app.memoria.core.Segmenter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -39,6 +40,7 @@ class Store(context: Context) {
         put("text", doc.text)
         put("created", doc.created)
         put("studyMillis", doc.studyMillis)
+        put("segmenter", Segmenter.VERSION)
         put("stats", JSONArray().apply {
             doc.stats.forEach { (index, s) ->
                 put(JSONObject().apply {
@@ -62,7 +64,8 @@ class Store(context: Context) {
             created = o.getLong("created"),
             studyMillis = o.optLong("studyMillis"),
         )
-        val stats = o.optJSONArray("stats") ?: JSONArray()
+        // Si el texto se dividió con otra versión, los índices de las partes ya no coinciden.
+        val stats = o.optJSONArray("stats")?.takeIf { o.optInt("segmenter", 1) == Segmenter.VERSION } ?: JSONArray()
         for (k in 0 until stats.length()) {
             val s = stats.getJSONObject(k)
             doc.stats[s.getInt("i")] = PartStats(

@@ -44,19 +44,71 @@ data class AlignResult(val steps: List<Step>, val expectedCount: Int) {
 object Aligner {
     fun tokens(text: String): List<String> = text.split(Regex("\\s+")).filter { it.isNotBlank() }
 
-    /** Minúsculas, sin tildes ni puntuación, para que el reconocedor de voz no cuente como error un acento. */
+    /**
+     * Minúsculas, sin tildes ni puntuación, y los números en cifras, para que no cuente como error
+     * un acento o que el reconocedor escriba "1" donde el texto dice "primero" (o al revés).
+     */
     fun normalize(word: String): String {
         val decomposed = Normalizer.normalize(word.lowercase(), Normalizer.Form.NFD)
-        return decomposed.replace(Regex("\\p{Mn}+"), "").replace(Regex("[^\\p{L}\\p{N}]"), "")
+        val plain = decomposed.replace(Regex("\\p{Mn}+"), "").replace(Regex("[^\\p{L}\\p{N}]"), "")
+        numberWords[plain]?.let { return it.toString() }
+        ordinalSuffix.matchEntire(plain)?.let { return it.groupValues[1] }
+        return plain
+    }
+
+    private val ordinalSuffix = Regex("(\\d+)(ro|ra|do|da|er|to|ta|vo|va|no|na|mo|ma|o|a)")
+
+    private val numberWords: Map<String, Int> = buildMap {
+        put("cero", 0)
+        listOf("un", "uno", "una", "primero", "primera", "primer").forEach { put(it, 1) }
+        listOf("dos", "segundo", "segunda").forEach { put(it, 2) }
+        listOf("tres", "tercero", "tercera", "tercer").forEach { put(it, 3) }
+        listOf("cuatro", "cuarto", "cuarta").forEach { put(it, 4) }
+        listOf("cinco", "quinto", "quinta").forEach { put(it, 5) }
+        listOf("seis", "sexto", "sexta").forEach { put(it, 6) }
+        listOf("siete", "septimo", "septima", "setimo", "setima").forEach { put(it, 7) }
+        listOf("ocho", "octavo", "octava").forEach { put(it, 8) }
+        listOf("nueve", "noveno", "novena").forEach { put(it, 9) }
+        listOf("diez", "decimo", "decima").forEach { put(it, 10) }
+        listOf(
+            "once", "doce", "trece", "catorce", "quince", "dieciseis", "diecisiete", "dieciocho", "diecinueve", "veinte",
+            "veintiuno", "veintidos", "veintitres", "veinticuatro", "veinticinco", "veintiseis", "veintisiete",
+            "veintiocho", "veintinueve",
+        ).forEachIndexed { i, w -> put(w, 11 + i) }
+        listOf("treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta", "noventa")
+            .forEachIndexed { i, w -> put(w, 30 + 10 * i) }
+        listOf("cien", "ciento").forEach { put(it, 100) }
+        put("mil", 1000)
+    }
+
+    /** Junta "treinta y dos" en "32", igual que lo escribe el reconocedor. */
+    private fun joinCompoundNumbers(words: List<String>, normalized: List<String>): Pair<List<String>, List<String>> {
+        val outRaw = mutableListOf<String>()
+        val outNorm = mutableListOf<String>()
+        var i = 0
+        while (i < normalized.size) {
+            val tens = normalized[i].toIntOrNull()
+            val unit = normalized.getOrNull(i + 2)?.toIntOrNull()
+            if (tens != null && tens in 30..90 && tens % 10 == 0 && normalized.getOrNull(i + 1) == "y" &&
+                unit != null && unit in 1..9
+            ) {
+                outRaw += words.subList(i, i + 3).joinToString(" ")
+                outNorm += (tens + unit).toString()
+                i += 3
+            } else {
+                outRaw += words[i]
+                outNorm += normalized[i]
+                i++
+            }
+        }
+        return outRaw to outNorm
     }
 
     fun align(expected: String, said: String): AlignResult = align(tokens(expected), tokens(said))
 
     fun align(expectedRaw: List<String>, saidRaw: List<String>): AlignResult {
-        val exp = expectedRaw.filter { normalize(it).isNotEmpty() }
-        val said = saidRaw.filter { normalize(it).isNotEmpty() }
-        val en = exp.map(::normalize)
-        val sn = said.map(::normalize)
+        val (exp, en) = expectedRaw.filter { normalize(it).isNotEmpty() }.let { joinCompoundNumbers(it, it.map(::normalize)) }
+        val (said, sn) = saidRaw.filter { normalize(it).isNotEmpty() }.let { joinCompoundNumbers(it, it.map(::normalize)) }
         val n = en.size
         val m = sn.size
 
